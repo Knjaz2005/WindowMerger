@@ -1,0 +1,87 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:WindowMerger"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d" d:DesignWidth="980" d:DesignHeight="620"
+        x:Class="WindowMerger.MainWindow"
+        Title="WindowMerger"
+        Width="980"
+        Height="620"
+        MinWidth="760"
+        MinHeight="460">
+    <Grid Margin="20" RowDefinitions="Auto,Auto,*,Auto" RowSpacing="12">
+        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+            <StackPanel Spacing="2">
+                <TextBlock Text="Окна экранов"
+                           FontSize="24"
+                           FontWeight="SemiBold" />
+                <TextBlock x:Name="SummaryText"
+                           Opacity="0.72" />
+            </StackPanel>
+
+            <Button Grid.Column="1"
+                    VerticalAlignment="Center"
+                    Content="Обновить"
+                    Click="RefreshButton_OnClick" />
+        </Grid>
+
+        <Grid Grid.Row="1"
+              Margin="8,0"
+              ColumnDefinitions="2*,1.1*,0.9*,1.2*,1.1*">
+            <TextBlock Text="Окно" FontWeight="SemiBold" />
+            <TextBlock Grid.Column="1" Text="Экран" FontWeight="SemiBold" Margin="12,0,0,0" />
+            <TextBlock Grid.Column="2" Text="Позиция" FontWeight="SemiBold" Margin="12,0,0,0" />
+            <TextBlock Grid.Column="3" Text="Процесс" FontWeight="SemiBold" Margin="12,0,0,0" />
+            <TextBlock Grid.Column="4" Text="PID" FontWeight="SemiBold" Margin="12,0,0,0" />
+        </Grid>
+
+        <ListBox x:Name="WindowList"
+                 Grid.Row="2"
+                 SelectionMode="Single"
+                 DoubleTapped="WindowList_OnDoubleTapped">
+            <ListBox.Styles>
+                <Style Selector="ListBoxItem">
+                    <Setter Property="Padding" Value="0" />
+                    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                </Style>
+            </ListBox.Styles>
+            <ListBox.ItemTemplate>
+                <DataTemplate x:DataType="local:WindowListItem">
+                    <Border Padding="8,7">
+                        <Grid ColumnDefinitions="2*,1.1*,0.9*,1.2*,1.1*">
+                            <TextBlock Text="{Binding Title}"
+                                       TextTrimming="CharacterEllipsis"
+                                       VerticalAlignment="Center" />
+                            <TextBlock Grid.Column="1"
+                                       Text="{Binding ScreenName}"
+                                       TextTrimming="CharacterEllipsis"
+                                       VerticalAlignment="Center"
+                                       Margin="12,0,0,0" />
+                            <TextBlock Grid.Column="2"
+                                       Text="{Binding BoundsText}"
+                                       TextTrimming="CharacterEllipsis"
+                                       VerticalAlignment="Center"
+                                       Margin="12,0,0,0" />
+                            <TextBlock Grid.Column="3"
+                                       Text="{Binding ProcessName}"
+                                       TextTrimming="CharacterEllipsis"
+                                       VerticalAlignment="Center"
+                                       Margin="12,0,0,0" />
+                            <TextBlock Grid.Column="4"
+                                       Text="{Binding ProcessId}"
+                                       TextTrimming="CharacterEllipsis"
+                                       VerticalAlignment="Center"
+                                       Margin="12,0,0,0" />
+                        </Grid>
+                    </Border>
+                </DataTemplate>
+            </ListBox.ItemTemplate>
+        </ListBox>
+
+        <TextBlock x:Name="StatusText"
+                   Grid.Row="3"
+                   Opacity="0.72"
+                   TextWrapping="Wrap" />
+    </Grid>
+</Window>
