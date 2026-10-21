@@ -20,7 +20,8 @@
                            Opacity="0.72" />
             </StackPanel>
 
-            <Button Grid.Column="1"
+            <Button x:Name="RefreshButton"
+                    Grid.Column="1"
                     VerticalAlignment="Center"
                     Content="Обновить"
                     Click="RefreshButton_OnClick" />
@@ -28,7 +29,7 @@
 
         <Grid Grid.Row="1"
               Margin="8,0"
-              ColumnDefinitions="2*,1.1*,0.9*,1.2*,1.1*">
+              ColumnDefinitions="2.4*,1.5*,1.7*,1.3*,64">
             <TextBlock Text="Окно" FontWeight="SemiBold" />
             <TextBlock Grid.Column="1" Text="Экран" FontWeight="SemiBold" Margin="12,0,0,0" />
             <TextBlock Grid.Column="2" Text="Позиция" FontWeight="SemiBold" Margin="12,0,0,0" />
@@ -39,6 +40,7 @@
         <ListBox x:Name="WindowList"
                  Grid.Row="2"
                  SelectionMode="Single"
+                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                  DoubleTapped="WindowList_OnDoubleTapped">
             <ListBox.Styles>
                 <Style Selector="ListBoxItem">
@@ -49,22 +51,26 @@
             <ListBox.ItemTemplate>
                 <DataTemplate x:DataType="local:WindowListItem">
                     <Border Padding="8,7">
-                        <Grid ColumnDefinitions="2*,1.1*,0.9*,1.2*,1.1*">
+                        <Grid ColumnDefinitions="2.4*,1.5*,1.7*,1.3*,64">
                             <TextBlock Text="{Binding Title}"
+                                       ToolTip.Tip="{Binding Title}"
                                        TextTrimming="CharacterEllipsis"
                                        VerticalAlignment="Center" />
                             <TextBlock Grid.Column="1"
                                        Text="{Binding ScreenName}"
+                                       ToolTip.Tip="{Binding ScreenName}"
                                        TextTrimming="CharacterEllipsis"
                                        VerticalAlignment="Center"
                                        Margin="12,0,0,0" />
                             <TextBlock Grid.Column="2"
                                        Text="{Binding BoundsText}"
+                                       ToolTip.Tip="{Binding BoundsText}"
                                        TextTrimming="CharacterEllipsis"
                                        VerticalAlignment="Center"
                                        Margin="12,0,0,0" />
                             <TextBlock Grid.Column="3"
                                        Text="{Binding ProcessName}"
+                                       ToolTip.Tip="{Binding ProcessName}"
                                        TextTrimming="CharacterEllipsis"
                                        VerticalAlignment="Center"
                                        Margin="12,0,0,0" />

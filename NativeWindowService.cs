@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading.Tasks;
 
 namespace WindowMerger
 {
@@ -11,47 +13,56 @@ namespace WindowMerger
     {
         private const int MonitorInfoPrimary = 0x00000001;
         private const int DwmwaCloaked = 14;
-        private const int SwRestore = 9;
+        private const int SwShowNoActivate = 4;
+        private const uint MonitorDefaultToNearest = 2;
+        private const uint SwpNoSize = 0x0001;
         private const uint SwpNoZOrder = 0x0004;
         private const uint SwpNoActivate = 0x0010;
+        private const uint SwpAsyncWindowPos = 0x4000;
+        private const int GwlStyle = -16;
+        private const int GwlExStyle = -20;
+        private const long WsCaption = 0x00C00000;
+        private const long WsExToolWindow = 0x00000080;
+        private const long WsExAppWindow = 0x00040000;
+        private const long WsExNoActivate = 0x08000000;
 
-        public IReadOnlyList<WindowListItem> GetWindows()
+        public IReadOnlyList<WindowListItem> GetWindows(IReadOnlyList<MonitorInfo>? monitors = null)
         {
             if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
                 return Array.Empty<WindowListItem>();
             }
 
-            var monitors = GetMonitors();
+            monitors ??= GetMonitors();
             var windows = new List<WindowListItem>();
 
-            EnumWindows((handle, _) =>
+            if (!EnumWindows((handle, _) =>
             {
                 if (!ShouldShowWindow(handle) || !TryGetWindowBounds(handle, out var bounds))
                 {
                     return true;
                 }
 
-                var title = GetWindowTitle(handle);
-                if (string.IsNullOrWhiteSpace(title))
-                {
-                    return true;
-                }
-
-                var monitor = FindMonitor(bounds, monitors);
+                var monitorHandle = MonitorFromWindow(handle, MonitorDefaultToNearest);
+                var monitor = monitors.FirstOrDefault(item => item.Handle == monitorHandle);
                 var (processName, processId) = GetProcessInfo(handle);
+                var title = GetWindowTitle(handle);
 
                 windows.Add(new WindowListItem(
                     handle,
-                    title,
+                    string.IsNullOrWhiteSpace(title) ? $"{processName} (без заголовка)" : title,
                     processName,
                     processId,
                     bounds,
                     monitor?.DisplayName ?? "Неизвестный экран",
-                    monitor?.Index ?? int.MaxValue));
+                    monitor?.Index ?? int.MaxValue,
+                    IsIconic(handle)));
 
                 return true;
-            }, IntPtr.Zero);
+            }, IntPtr.Zero))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Не удалось получить список окон.");
+            }
 
             return windows
                 .OrderBy(window => window.ScreenIndex)
@@ -68,7 +79,7 @@ namespace WindowMerger
 
             var monitors = new List<MonitorInfo>();
 
-            EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (IntPtr handle, IntPtr deviceContext, ref Rect monitorRect, IntPtr data) =>
+            if (!EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (IntPtr handle, IntPtr deviceContext, ref Rect monitorRect, IntPtr data) =>
             {
                 var info = new MonitorInfoEx
                 {
@@ -88,7 +99,10 @@ namespace WindowMerger
                 }
 
                 return true;
-            }, IntPtr.Zero);
+            }, IntPtr.Zero))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Не удалось получить список экранов.");
+            }
 
             return monitors
                 .OrderBy(monitor => monitor.Bounds.Left)
@@ -97,67 +111,144 @@ namespace WindowMerger
                 .ToArray();
         }
 
-        public bool MoveToNextMonitor(IntPtr windowHandle, out string message)
+        public async Task<WindowMoveResult> MoveToNextMonitorAsync(WindowListItem window)
         {
-            message = string.Empty;
-
             if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
-                message = "Перенос окон поддерживается только в Windows.";
-                return false;
+                return new(false, "Перенос окон поддерживается только в Windows.");
+            }
+
+            var windowHandle = window.Handle;
+            if (!IsCurrentWindow(window))
+            {
+                return new(false, "Окно уже закрыто. Обновите список.");
             }
 
             var monitors = GetMonitors();
-            if (monitors.Count < 2)
+            if (monitors.Count == 0)
             {
-                message = "Следующий экран не найден: подключен только один экран.";
-                return false;
+                return new(false, "Не удалось найти подключенные экраны.");
             }
 
-            if (!TryGetWindowBounds(windowHandle, out var bounds))
+            // Resolve the source before restoring: a minimized window has synthetic coordinates.
+            var sourceHandle = MonitorFromWindow(windowHandle, MonitorDefaultToNearest);
+            var targetMonitor = GetNextMonitor(monitors, sourceHandle);
+            if (targetMonitor is null)
             {
-                message = "Не удалось получить размеры окна.";
-                return false;
+                return new(false, "Расположение экранов изменилось. Повторите перенос.");
             }
 
-            if (IsIconic(windowHandle) || IsZoomed(windowHandle))
+            var restoreTimer = Stopwatch.StartNew();
+            for (var restoreAttempt = 0; restoreAttempt < 2
+                && (IsIconic(windowHandle) || IsZoomed(windowHandle)); restoreAttempt++)
             {
-                ShowWindow(windowHandle, SwRestore);
-                TryGetWindowBounds(windowHandle, out bounds);
+                var wasMinimized = IsIconic(windowHandle);
+                if (!ShowWindowAsync(windowHandle, SwShowNoActivate))
+                {
+                    return new(false, "Не удалось восстановить окно.");
+                }
+
+                // A window minimized from maximized needs a second restore to become normal.
+                while (IsCurrentWindow(window)
+                    && (IsIconic(windowHandle) || (!wasMinimized && IsZoomed(windowHandle))))
+                {
+                    if (restoreTimer.ElapsedMilliseconds >= 2000)
+                    {
+                        return new(false, "Окно не отвечает на запрос восстановления.");
+                    }
+
+                    await Task.Delay(50);
+                }
             }
 
-            var sourceMonitor = FindMonitor(bounds, monitors);
-            if (sourceMonitor is null)
+            // A DPI change can resize the window after moving it. Recenter using its actual size.
+            for (var attempt = 0; attempt < 3; attempt++)
             {
-                message = "Не удалось определить текущий экран окна.";
-                return false;
+                if (!IsCurrentWindow(window) || !TryGetWindowBounds(windowHandle, out var bounds))
+                {
+                    return new(false, "Окно уже закрыто или недоступно. Обновите список.");
+                }
+
+                var centered = bounds.CenterIn(targetMonitor.WorkArea);
+                if (!SetWindowPos(windowHandle, IntPtr.Zero, centered.Left, centered.Top, 0, 0,
+                    SwpNoSize | SwpNoZOrder | SwpNoActivate | SwpAsyncWindowPos))
+                {
+                    var error = Marshal.GetLastWin32Error();
+                    return new(false, error == 5
+                        ? "Доступ к окну запрещён. Для этого окна нужны те же права запуска."
+                        : $"Не удалось перенести окно. Код Win32: {error}.");
+                }
+
+                var moveTimer = Stopwatch.StartNew();
+                while (moveTimer.ElapsedMilliseconds < 1000)
+                {
+                    await Task.Delay(50);
+                    if (!IsCurrentWindow(window) || !TryGetWindowBounds(windowHandle, out var actual))
+                    {
+                        return new(false, "Окно закрылось во время переноса.");
+                    }
+
+                    if (!IsIconic(windowHandle) && !IsZoomed(windowHandle)
+                        && actual == actual.CenterIn(targetMonitor.WorkArea))
+                    {
+                        return new(true, $"Окно перенесено: {targetMonitor.DisplayName}.");
+                    }
+
+                    if (actual.Width != bounds.Width || actual.Height != bounds.Height)
+                    {
+                        break;
+                    }
+                }
             }
 
-            var nextMonitorIndex = sourceMonitor.Index % monitors.Count;
-            var targetMonitor = monitors[nextMonitorIndex];
-            var targetArea = targetMonitor.WorkArea;
-            var x = targetArea.Left + Math.Max(0, (targetArea.Width - bounds.Width) / 2);
-            var y = targetArea.Top + Math.Max(0, (targetArea.Height - bounds.Height) / 2);
+            return new(false, "Окно не подтвердило перенос в центр экрана: оно не отвечает или ограничивает перемещение.");
+        }
 
-            if (!SetWindowPos(windowHandle, IntPtr.Zero, x, y, bounds.Width, bounds.Height, SwpNoZOrder | SwpNoActivate))
+        internal static MonitorInfo? GetNextMonitor(IReadOnlyList<MonitorInfo> monitors, IntPtr sourceHandle)
+        {
+            for (var index = 0; index < monitors.Count; index++)
             {
-                var error = Marshal.GetLastWin32Error();
-                message = $"Не удалось перенести окно. Код Win32: {error}.";
-                return false;
+                if (monitors[index].Handle == sourceHandle)
+                {
+                    return monitors[(index + 1) % monitors.Count];
+                }
             }
 
-            var title = GetWindowTitle(windowHandle);
-            message = string.IsNullOrWhiteSpace(title)
-                ? $"Окно перенесено на {targetMonitor.DisplayName}."
-                : $"Окно «{title}» перенесено на {targetMonitor.DisplayName}.";
-            return true;
+            return null;
+        }
+
+        private static bool IsCurrentWindow(WindowListItem window)
+        {
+            return IsWindow(window.Handle)
+                && GetWindowThreadProcessId(window.Handle, out var processId) != 0
+                && processId == window.ProcessId;
         }
 
         private static bool ShouldShowWindow(IntPtr handle)
         {
-            return IsWindowVisible(handle)
-                && !IsIconic(handle)
-                && !IsCloaked(handle);
+            if (!IsWindowVisible(handle) || IsCloaked(handle)
+                || handle == GetShellWindow() || handle == GetDesktopWindow())
+            {
+                return false;
+            }
+
+            var extendedStyle = GetWindowStyle(handle, GwlExStyle);
+            if ((extendedStyle & WsExAppWindow) == 0
+                && ((extendedStyle & WsExNoActivate) != 0
+                    || ((extendedStyle & WsExToolWindow) != 0
+                        && (GetWindowStyle(handle, GwlStyle) & WsCaption) == 0)))
+            {
+                return false;
+            }
+
+            var className = new StringBuilder(256);
+            _ = GetClassName(handle, className, className.Capacity);
+            return className.ToString() is not ("Shell_TrayWnd" or "Shell_SecondaryTrayWnd" or "Progman" or "WorkerW");
+        }
+
+        private static long GetWindowStyle(IntPtr handle, int index)
+        {
+            return IntPtr.Size == 8 ? GetWindowLongPtr(handle, index).ToInt64() : GetWindowLong(handle, index);
         }
 
         private static bool TryGetWindowBounds(IntPtr handle, out NativeBounds bounds)
@@ -199,23 +290,10 @@ namespace WindowMerger
                 using var process = Process.GetProcessById((int)processId);
                 return (process.ProcessName, (int)processId);
             }
-            catch
+            catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or Win32Exception)
             {
                 return ("Недоступный процесс", (int)processId);
             }
-        }
-
-        private static MonitorInfo? FindMonitor(NativeBounds bounds, IReadOnlyList<MonitorInfo> monitors)
-        {
-            if (monitors.Count == 0)
-            {
-                return null;
-            }
-
-            return monitors
-                .OrderByDescending(monitor => monitor.Bounds.GetIntersectionArea(bounds))
-                .ThenBy(monitor => monitor.Bounds.GetCenterDistanceSquared(bounds))
-                .First();
         }
 
         private static bool IsCloaked(IntPtr handle)
@@ -239,7 +317,7 @@ namespace WindowMerger
 
         private delegate bool MonitorEnumProc(IntPtr monitor, IntPtr deviceContext, ref Rect rect, IntPtr data);
 
-        [DllImport("user32.dll")]
+        [DllImport("user32.dll", SetLastError = true)]
         private static extern bool EnumWindows(EnumWindowsProc enumProc, IntPtr parameter);
 
         [DllImport("user32.dll", SetLastError = true)]
@@ -247,6 +325,27 @@ namespace WindowMerger
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfoEx monitorInfo);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr MonitorFromWindow(IntPtr handle, uint flags);
+
+        [DllImport("user32.dll")]
+        private static extern bool IsWindow(IntPtr handle);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetShellWindow();
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetDesktopWindow();
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetClassName(IntPtr handle, StringBuilder className, int maxCount);
+
+        [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
+        private static extern IntPtr GetWindowLongPtr(IntPtr handle, int index);
+
+        [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
+        private static extern int GetWindowLong(IntPtr handle, int index);
 
         [DllImport("user32.dll")]
         private static extern bool IsWindowVisible(IntPtr handle);
@@ -258,7 +357,7 @@ namespace WindowMerger
         private static extern bool IsZoomed(IntPtr handle);
 
         [DllImport("user32.dll")]
-        private static extern bool ShowWindow(IntPtr handle, int command);
+        private static extern bool ShowWindowAsync(IntPtr handle, int command);
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool GetWindowRect(IntPtr handle, out Rect rect);
@@ -300,6 +399,8 @@ namespace WindowMerger
         }
     }
 
+    internal sealed record WindowMoveResult(bool Success, string Message);
+
     internal sealed record MonitorInfo(
         int Index,
         IntPtr Handle,
@@ -322,7 +423,8 @@ namespace WindowMerger
             int processId,
             NativeBounds bounds,
             string screenName,
-            int screenIndex)
+            int screenIndex,
+            bool isMinimized)
         {
             Handle = handle;
             Title = title;
@@ -330,7 +432,7 @@ namespace WindowMerger
             ProcessId = processId;
             ScreenName = screenName;
             ScreenIndex = screenIndex;
-            BoundsText = $"{bounds.Left}, {bounds.Top}; {bounds.Width}x{bounds.Height}";
+            BoundsText = isMinimized ? "Свёрнуто" : $"{bounds.Left}, {bounds.Top}; {bounds.Width}x{bounds.Height}";
         }
 
         internal IntPtr Handle { get; }
@@ -342,8 +444,6 @@ namespace WindowMerger
         public string ProcessName { get; }
 
         public int ProcessId { get; }
-
-        public string ProcessText => $"{ProcessName} ({ProcessId})";
 
         public string ScreenName { get; }
 
@@ -361,24 +461,11 @@ namespace WindowMerger
             return new NativeBounds(rect.Left, rect.Top, rect.Right, rect.Bottom);
         }
 
-        public long GetIntersectionArea(NativeBounds other)
+        public NativeBounds CenterIn(NativeBounds area)
         {
-            var left = Math.Max(Left, other.Left);
-            var top = Math.Max(Top, other.Top);
-            var right = Math.Min(Right, other.Right);
-            var bottom = Math.Min(Bottom, other.Bottom);
-            var width = Math.Max(0, right - left);
-            var height = Math.Max(0, bottom - top);
-
-            return (long)width * height;
-        }
-
-        public double GetCenterDistanceSquared(NativeBounds other)
-        {
-            var x = (Left + Right) / 2d - (other.Left + other.Right) / 2d;
-            var y = (Top + Bottom) / 2d - (other.Top + other.Bottom) / 2d;
-
-            return x * x + y * y;
+            var left = area.Left + (area.Width - Width) / 2;
+            var top = area.Top + (area.Height - Height) / 2;
+            return new NativeBounds(left, top, left + Width, top + Height);
         }
     }
 }
