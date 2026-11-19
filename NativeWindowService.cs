@@ -14,6 +14,7 @@ namespace WindowMerger
         private const int MonitorInfoPrimary = 0x00000001;
         private const int DwmwaCloaked = 14;
         private const int SwShowNoActivate = 4;
+        private const int SwMaximize = 3;
         private const uint MonitorDefaultToNearest = 2;
         private const uint SwpNoSize = 0x0001;
         private const uint SwpNoZOrder = 0x0004;
@@ -111,7 +112,7 @@ namespace WindowMerger
                 .ToArray();
         }
 
-        public async Task<WindowMoveResult> MoveToNextMonitorAsync(WindowListItem window)
+        public async Task<WindowMoveResult> MoveToNextMonitorAsync(WindowListItem window, WindowSizeMode sizeMode = WindowSizeMode.Normal)
         {
             if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
@@ -169,9 +170,18 @@ namespace WindowMerger
                     return new(false, "Окно уже закрыто или недоступно. Обновите список.");
                 }
 
-                var centered = bounds.CenterIn(targetMonitor.WorkArea);
-                if (!SetWindowPos(windowHandle, IntPtr.Zero, centered.Left, centered.Top, 0, 0,
-                    SwpNoSize | SwpNoZOrder | SwpNoActivate | SwpAsyncWindowPos))
+                var desiredSize = sizeMode == WindowSizeMode.Reset
+                    ? new NativeBounds(0, 0, Math.Max(1, targetMonitor.WorkArea.Width * 4 / 5),
+                        Math.Max(1, targetMonitor.WorkArea.Height * 4 / 5))
+                    : bounds;
+                var centered = desiredSize.CenterIn(targetMonitor.WorkArea);
+                var flags = SwpNoZOrder | SwpNoActivate | SwpAsyncWindowPos;
+                if (sizeMode != WindowSizeMode.Reset)
+                {
+                    flags |= SwpNoSize;
+                }
+
+                if (!SetWindowPos(windowHandle, IntPtr.Zero, centered.Left, centered.Top, centered.Width, centered.Height, flags))
                 {
                     var error = Marshal.GetLastWin32Error();
                     return new(false, error == 5
@@ -188,10 +198,16 @@ namespace WindowMerger
                         return new(false, "Окно закрылось во время переноса.");
                     }
 
-                    if (!IsIconic(windowHandle) && !IsZoomed(windowHandle)
+                    var sizeConfirmed = sizeMode != WindowSizeMode.Reset
+                        || (actual.Width == desiredSize.Width && actual.Height == desiredSize.Height);
+                    if (sizeConfirmed && !IsIconic(windowHandle) && !IsZoomed(windowHandle)
                         && actual == actual.CenterIn(targetMonitor.WorkArea))
                     {
-                        return new(true, $"Окно перенесено: {targetMonitor.DisplayName}.");
+                        return sizeMode == WindowSizeMode.Maximized
+                            ? await MaximizeWindowAsync(window, targetMonitor)
+                            : new(true, sizeMode == WindowSizeMode.Reset
+                                ? $"Размер окна сброшен: {targetMonitor.DisplayName}."
+                                : $"Окно перенесено: {targetMonitor.DisplayName}.");
                     }
 
                     if (actual.Width != bounds.Width || actual.Height != bounds.Height)
@@ -201,7 +217,40 @@ namespace WindowMerger
                 }
             }
 
-            return new(false, "Окно не подтвердило перенос в центр экрана: оно не отвечает или ограничивает перемещение.");
+            return new(false, sizeMode == WindowSizeMode.Reset
+                ? "Окно не подтвердило сброс размера: приложение не отвечает или ограничивает размеры окна."
+                : "Окно не подтвердило перенос в центр экрана: оно не отвечает или ограничивает перемещение.");
+        }
+
+        private static async Task<WindowMoveResult> MaximizeWindowAsync(WindowListItem window, MonitorInfo targetMonitor)
+        {
+            if (!IsCurrentWindow(window))
+            {
+                return new(false, "Окно закрылось перед разворачиванием.");
+            }
+
+            if (!ShowWindowAsync(window.Handle, SwMaximize))
+            {
+                return new(false, "Окно перенесено, но не удалось его развернуть.");
+            }
+
+            var timer = Stopwatch.StartNew();
+            while (timer.ElapsedMilliseconds < 2000)
+            {
+                await Task.Delay(50);
+                if (!IsCurrentWindow(window))
+                {
+                    return new(false, "Окно закрылось во время разворачивания.");
+                }
+
+                if (IsZoomed(window.Handle) && !IsIconic(window.Handle)
+                    && MonitorFromWindow(window.Handle, MonitorDefaultToNearest) == targetMonitor.Handle)
+                {
+                    return new(true, $"Окно перенесено и развёрнуто: {targetMonitor.DisplayName}.");
+                }
+            }
+
+            return new(false, "Окно перенесено, но не подтвердило разворачивание на целевом экране.");
         }
 
         internal static MonitorInfo? GetNextMonitor(IReadOnlyList<MonitorInfo> monitors, IntPtr sourceHandle)
@@ -397,6 +446,13 @@ namespace WindowMerger
             [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
             public string DeviceName;
         }
+    }
+
+    internal enum WindowSizeMode
+    {
+        Normal,
+        Maximized,
+        Reset
     }
 
     internal sealed record WindowMoveResult(bool Success, string Message);

@@ -80,10 +80,14 @@ namespace WindowMerger
             isMoving = true;
             WindowList.IsEnabled = false;
             RefreshButton.IsEnabled = false;
+            SizeModePanel.IsEnabled = false;
             StatusText.Text = "Перенос окна...";
             try
             {
-                var result = await windowService.MoveToNextMonitorAsync(window);
+                var sizeMode = MaximizeRadioButton.IsChecked == true
+                    ? WindowSizeMode.Maximized
+                    : ResetSizeRadioButton.IsChecked == true ? WindowSizeMode.Reset : WindowSizeMode.Normal;
+                var result = await windowService.MoveToNextMonitorAsync(window, sizeMode);
                 RefreshWindows();
                 StatusText.Text = result.Message;
             }
@@ -96,6 +100,7 @@ namespace WindowMerger
                 isMoving = false;
                 WindowList.IsEnabled = true;
                 RefreshButton.IsEnabled = true;
+                SizeModePanel.IsEnabled = true;
             }
         }
 
